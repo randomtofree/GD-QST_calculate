@@ -1,5 +1,6 @@
 # Quantum state tomography with gradient descent 
 
+This repository contains the code required to reproduce the plots from https://arxiv.org/abs/2503.04526  
 
 ## Installation and use
 
