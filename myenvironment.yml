@@ -1,0 +1,20 @@
+name: my_gd_qst_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10.13
+  - pip=23.3.2
+  - pip:
+    - cvxpy==1.5.3
+    - jax==0.4.23
+    - jaxlib==0.4.23
+    - jupyterlab
+    - matplotlib==3.8.0
+    - numpy
+    - platformdirs==4.1.0
+    - qutip==5.0.0
+    - qutip-qip==0.3.2
+    - scipy==1.11.4
+    - tqdm==4.66.1
+    - optax==0.1.8
