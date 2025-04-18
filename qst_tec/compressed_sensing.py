@@ -1,17 +1,8 @@
 from qutip import * 
-import qutip as qt
-
-import qutip.qip.operations.gates as qugate # type: ignore
 
 import numpy as np
-import matplotlib.pyplot as plt
-import math
-from itertools import *
-import random
-import cmath as cm
-from scipy.optimize import minimize
+
 import cvxpy as cp
-import random as rand
 import time
 ############## 
 
