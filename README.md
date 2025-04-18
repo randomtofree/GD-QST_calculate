@@ -4,11 +4,11 @@ This repository contains the code required to reproduce the plots from https://a
 
 ## Installation and use
 
-Install the environment.yml or you can install the libraries by yourself, but be careful with the version of QuTip, in our case we are using qutip==5.0.0a2
+Install the myenvironment.yml or you can install the libraries by yourself, but be careful with the version of QuTip, in this project qutip==5.0.0 is used.
 
 ```python
 conda env create -f environment.yml
-conda activate gd_qst_env
+conda activate applesilicon_gd_qst_env
 ```
 The notebooks in the `examples` folder are tutorials on how to do the quantum state tomography with the different methods of gradient descent. 
 
