@@ -22,3 +22,6 @@ htmlcov/
 .tox/
 .coverage
 coverage.xml
+
+# data
+*.npz
