@@ -1,4 +1,4 @@
-name: gd_qst_env_m1
+name: gdqst_exp
 channels:
   - conda-forge
   - defaults
