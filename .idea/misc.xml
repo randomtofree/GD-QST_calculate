@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="gd_qst_env" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="gd_qst_env" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="gd_qst_env_m1" project-jdk-type="Python SDK" />
 </project>
