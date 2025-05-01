@@ -1,4 +1,4 @@
-name: gdqst_exp
+name: SchmidtNumber
 channels:
   - conda-forge
   - defaults
