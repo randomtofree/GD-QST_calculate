@@ -1,10 +1,10 @@
 # Quantum state tomography with gradient descent 
 
-This repository contains the code required to reproduce the plots from https://arxiv.org/abs/2503.04526  
+This repository fork  the GD_QST(https://github.com/mstorresh/GD-QST).
 
 ## Installation and use
 
-Install the myenvironment.yml or you can install the libraries by yourself, but be careful with the version of QuTip, in this project qutip==5.0.0 is used.
+the myenvironment.yml has been much simplified.
 
 ```python
 conda env create -f environment.yml
