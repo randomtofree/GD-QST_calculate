@@ -1,2 +1,28 @@
-.idea
-.DS_Store
+# Byte-compiled / optimized files
+\_\_pycache\_\_/
+*.py[cod]
+*$py.class
+
+# Virtual environment directories
+venv/
+ENV/
+env/
+
+# PyCharm settings
+\.idea/
+\.jupyter/
+\.DS_Store/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Test and coverage directories
+htmlcov/
+.tox/
+.coverage
+coverage.xml
+
+# data
+*.npz
