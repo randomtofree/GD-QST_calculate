@@ -25,7 +25,7 @@ import time
 
 
 @jit
-def jnpexpect(ope: jnp.ndarray,rho: jnp.ndarray):  
+def jnpboundentangledqualification(ope: jnp.ndarray,rho: jnp.ndarray):  
     #Calculate the expected value with the jax arrays (matrices),
     # operators and the density matrix 
     def tr_dot(ope):
@@ -45,7 +45,7 @@ def cost(rho1: jnp.ndarray, data: jnp.ndarray, ops_jnp: jnp.ndarray, lamb:float)
     """
     # print(len(jnpexpect(Oper,rho1)))
     rho = jnp.matmul(jnp.conj(rho1.T),rho1)/jnp.trace(jnp.matmul(jnp.conj(rho1.T),rho1))
-    l2 = jnp.sum((data - jnpexpect(ops_jnp,rho))**2)
+    l2 = jnpexpect(ops_jnp,rho)
     return l2 + lamb*jnp.linalg.norm(rho, 1)
 
 
