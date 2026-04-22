@@ -3,6 +3,7 @@ from qutip import Qobj, qeye
 from itertools import product
 from qutip import tensor
 
+
 def get_generalized_gell_mann(d):
     """
     生成任意维度 d 的广义盖尔曼矩阵基底。
@@ -41,3 +42,5 @@ def get_generalized_gell_mann(d):
         matrices.append(Qobj(prefactor * diag))
         
     return matrices
+
+
