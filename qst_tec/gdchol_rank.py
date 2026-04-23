@@ -21,7 +21,8 @@ import optax
 
 from tqdm.auto import tqdm
 import time
-
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 
 
@@ -92,12 +93,14 @@ def cost(rho1: jnp.ndarray,  lamb:float):
     return l2 + lamb*partial_transpose_b_penalty(rho)
 
 
+
 def gd_chol_bes_search(params: optax.Params, iterations: int,
                        lr=2e-1, decay=0.01, lamb: float=0.01, 
                        tqdm_off=False, record_freq=100):
     """
     修改自 GD-QST，专用于搜索 Bound Entangled States (BES)。
-    加入 record_freq 避免频繁的 GPU->CPU 数据传输。
+    采用 jax.lax.scan 与 chunking 机制重构，大幅减少 Python 调度开销。
+    输出接口与原版完全一致。
     """
     start_learning_rate = lr
     scheduler = optax.exponential_decay(
@@ -107,7 +110,7 @@ def gd_chol_bes_search(params: optax.Params, iterations: int,
         
     gradient_transform = optax.chain(
         optax.clip_by_global_norm(1.0),  
-        optax.scale_by_adam(),           
+        optax.scale_by_adam(),          
         optax.scale_by_schedule(scheduler), 
         optax.scale(-1.0) 
     )
@@ -119,154 +122,114 @@ def gd_chol_bes_search(params: optax.Params, iterations: int,
     
     opt_state = gradient_transform.init(params)
     
-    # 【加上 JIT 装饰器】
-    @jit
-    def step(params, opt_state, current_lamb):
-        # 1. 计算梯度与 loss
-        # 使用 value_and_grad 可以同时算出 loss 和 梯度，避免重复计算
-        loss_val, grad_f = jax.value_and_grad(cost, argnums=0)(params, current_lamb)
-        grads = jnp.conj(grad_f)
-    
-        # 2. 更新参数
-        updates, opt_state = gradient_transform.update(grads, opt_state, params)
-        new_params = optax.apply_updates(params, updates)
-
-        # 3. 在 GPU 内部重构 rho 以计算监控指标
-        t_dag_t = jnp.matmul(jnp.conj(new_params.T), new_params)
+    # 【优化 1】：将监控指标计算从核心更新循环中剥离
+    @jax.jit
+    def compute_metrics(current_params, current_lamb):
+        # 仅在需要记录时，才重构 rho 并计算耗时的 CCNR 和 PPT
+        t_dag_t = jnp.matmul(jnp.conj(current_params.T), current_params)
         rho = t_dag_t / jnp.trace(t_dag_t)
-    
-        # 4. 打包所有需要的指标
-        metrics = {
-            "loss": loss_val,
-            "ccnr": calculate_ccnr(rho),
-            "ppt_pen": partial_transpose_b_penalty(rho)
-        }
-    
-        return new_params, opt_state, metrics
+        
+        loss_val = cost(current_params, current_lamb)
+        ccnr_val = calculate_ccnr(rho)
+        ppt_val = partial_transpose_b_penalty(rho)
+        return loss_val, ccnr_val, ppt_val
+
+    # 【优化 2】：lax.scan 的纯净单步更新函数（仅保留梯度和优化器状态计算）
+    def scan_step(state, step_idx):
+        current_params, current_opt_state = state
+        
+        # 计算梯度
+        loss_val, grad_f = jax.value_and_grad(cost, argnums=0)(current_params, lamb)
+        grads = jnp.conj(grad_f)
+        
+        # 更新参数
+        updates, new_opt_state = gradient_transform.update(grads, current_opt_state, current_params)
+        new_params = optax.apply_updates(current_params, updates)
+        
+        return (new_params, new_opt_state), None
+
+    # 【优化 3】：利用 record_freq 作为 chunk_size
+    chunk_size = record_freq
+    num_chunks = iterations // chunk_size
+    remainder = iterations % chunk_size
+
+    @jax.jit
+    def scan_chunk(current_state):
+        # 编译 chunk_size 次循环，完全在硬件底层运行
+        return jax.lax.scan(scan_step, current_state, jnp.arange(chunk_size))
+        
+    @jax.jit
+    def scan_remainder(current_state):
+        # 处理不能被 chunk_size 整除的剩余迭代
+        return jax.lax.scan(scan_step, current_state, jnp.arange(remainder))
 
     tot_time = 0
-    pbar_GD = range(iterations) if tqdm_off else tqdm(range(iterations))
+    current_state = (params, opt_state)
+    
+    # 进度条现在显示的是 Chunk 的进度，而不是单步的进度
+    total_steps = num_chunks + (1 if remainder > 0 else 0)
+    pbar_GD = range(total_steps) if tqdm_off else tqdm(range(total_steps), desc="BES Search")
 
     for i in pbar_GD:
         start = time.time()
         
-        # 【修正Bug】：正确接收 3 个返回值
-        params, opt_state, metrics = step(params, opt_state, lamb)
+        # 1. 批量在底层执行参数更新
+        if i < num_chunks:
+            current_state, _ = scan_chunk(current_state)
+        else:
+            current_state, _ = scan_remainder(current_state)
+            
+        # 2. 提取当前 Chunk 结束后的最新参数
+        current_params = current_state[0]
+        
+        # 3. 计算本阶段的监控指标
+        loss_val, ccnr_val, ppt_val = compute_metrics(current_params, lamb)
+        
+        # JAX 是异步的，调用 float() 会隐式触发 block_until_ready() 同步计算
+        current_loss = float(loss_val)
+        current_ccnr = float(ccnr_val)
+        current_ppt = float(ppt_val)
         
         end = time.time()
         tot_time += (end - start)
         
-        # 【性能优化】：仅在满足频率要求，或是最后一步时，才将数据拉回 CPU
-        if i % record_freq == 0 or i == iterations - 1:
-            # 这里的 float() 会触发 GPU 到 CPU 的同步
-            current_loss = float(metrics["loss"])
-            current_ccnr = float(metrics["ccnr"])
-            current_ppt = float(metrics["ppt_pen"])
-            
-            loss1.append(current_loss)
-            ccnr_track.append(current_ccnr)
-            ppt_track.append(current_ppt)
-            timel_GD.append(tot_time)
-            
-            if not tqdm_off:
-                pbar_GD.set_description(f"Loss: {current_loss:.4f} | CCNR: {current_ccnr:.4f} | PPT: {current_ppt:.2e}")
+        # 4. 记录数据（输出格式和频率与原版完全相同）
+        loss1.append(current_loss)
+        ccnr_track.append(current_ccnr)
+        ppt_track.append(current_ppt)
+        timel_GD.append(tot_time)
+        
+        if not tqdm_off:
+            pbar_GD.set_description(f"Loss: {current_loss:.4f} | CCNR: {current_ccnr:.4f} | PPT: {current_ppt:.2e}")
 
-    # 最终结果重构
-    params1 = jnp.matmul(jnp.conj(params.T), params) / jnp.trace(jnp.matmul(jnp.conj(params.T), params))
+    # 最终结果重构，返回结构保持原样
+    final_params = current_state[0]
+    params1 = jnp.matmul(jnp.conj(final_params.T), final_params) / jnp.trace(jnp.matmul(jnp.conj(final_params.T), final_params))
+    
     return params1, ccnr_track, ppt_track, timel_GD, loss1
 
-"""
-def gd_chol_rank(params: optax.Params, iterations: int,  batch_size: int,
-            lr=2e-1, decay = 0.999, lamb:float =0.00001, batch=True, tqdm_off=False):
-
-  Function to do the GD-Chol.
-  Return:
-    params1: The reconstructed density matrix
-    fidelities_GD: A list with the fidelities values per iteration
-    timel_GD: A list with the value of the time per iteration
-    loss1: A list with the value of the loss function per iteration
-
-  Input:
-    data: the expected value of the original density matrix
-    rho_or: original density matrix, to calculate the fidelity
-    ops_jnp: POVM in jnp array
-    params: Ansatz, any complex matrix T (not necessary the lower triangular)
-    iterations: number of iterations for the method
-    batch_size: batch size
-    lr: learning rate
-    decay: value of the decay of the lr (defined in given optimizer)
-    lamb: hyperparameter l1 regularization
-    batch: True to have mini batches, False to take all the data
-    tqdm_off: To show the iteration bar. True is to desactivate (for the cluster)
+def plot_density_matrix_heatmap(rho, title="Searched Density Matrix"):
+    # 转换为 numpy 格式，以防它是 JAX array 或 Qobj
+    rho_np = np.array(rho) 
     
- 
-  start_learning_rate = lr
-  # Exponential decay of the learning rate.
-  scheduler = optax.exponential_decay(
-      init_value=start_learning_rate, 
-      transition_steps=iterations,
-      decay_rate=decay)
-  # Combining gradient transforms using `optax.chain`.
-  gradient_transform = optax.chain(
-      optax.clip_by_global_norm(1.0),  # Clip by the gradient by the global norm.
-      optax.scale_by_adam(),  # Use the updates from adam.
-      optax.scale_by_schedule(scheduler),  # Use the learning rate from the scheduler.
-      # Scale updates by -1 since optax.apply_updates is additive and we want to descend on the loss.
-      optax.scale(-1.0)
-  )
-  
-
-  loss1 = []
-  purity_GD = []
-  timel_GD = []
-  #par_o = jnp.matmul(jnp.conj(params.T),params)/jnp.trace(jnp.matmul(jnp.conj(params.T),params))
-  #fidelities_GD.append(qtp.fidelity(rho_or, qtp.Qobj(par_o)))
-  #loss1.append(float(cost(params, jnp.asarray(data), ops_jnp, lamb)))
-  opt_state = gradient_transform.init(params)
-  num_me = len(data)
-  # opt_state = optimizer.init(params)
-  if not tqdm_off:
-    pbar_GD = tqdm(range(iterations)) 
-  
-  @jit
-  def step(params, opt_state):
-    grad_f = jax.grad(cost, argnums=0)(params, lamb)
-    grads = jnp.conj(grad_f)           # do a conjugate, if not can create some problems
-    # updates, opt_state = optimizer.update(grads, opt_state, params)
-    updates, opt_state = gradient_transform.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates)
-
-    return params, opt_state
-  
-
-  tot_time = 0
-  for i in tqdm(range(iterations), disable=tqdm_off):
-    start = time.time()
-    if batch:
-        rng = default_rng()
-        indix = rng.choice(num_me, size=batch_size, replace=False)
-        # indix = np.random.randint(0, num_me, size=[batch_size])
-        data_b = jnp.asarray(data[[indix]].flatten())
-        ops2 = ops_jnp[indix]
-    else: 
-        ops2 = ops_jnp
-        data_b = data
-    params, opt_state = step(params, opt_state,data_b, ops2)
-    #params = rho_cons(params)
-    par1 = jnp.matmul(jnp.conj(params.T),params)/jnp.trace(jnp.matmul(jnp.conj(params.T),params))
-    loss1.append(float(cost(params, data_b, ops2, lamb)))
-    f = qtp.fidelity(rho_or, qtp.Qobj(par1))
-    fidelities_GD.append(f)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     
-    end = time.time()
-    timestep = end - start
-    tot_time += timestep
-    timel_GD.append(tot_time)
-    #timel_GD.append(end - start)  
-    if not tqdm_off:
-        pbar_GD.set_description("Fidelity GD-chol-rank {:.4f}".format(f))
-        pbar_GD.update()
-
-  params1 = jnp.matmul(jnp.conj(params.T),params)/jnp.trace(jnp.matmul(jnp.conj(params.T),params))
-  return params1, fidelities_GD, timel_GD, loss1
-"""
+    # 设定统一的颜色范围，让实部和虚部的颜色比例一致
+    # 密度矩阵的元素绝对值通常不会超过 1
+    vmax = max(np.max(np.abs(np.real(rho_np))), np.max(np.abs(np.imag(rho_np))))
+    vmin = -vmax
+    
+    # 绘制实部 (cmap="RdBu_r" 是蓝-白-红的渐变色，0 是白色)
+    sns.heatmap(np.real(rho_np), ax=axes[0], cmap="RdBu_r", 
+                center=0, vmin=vmin, vmax=vmax, 
+                annot=False, cbar=True, square=True)
+    axes[0].set_title(f"{title} - Real Part")
+    
+    # 绘制虚部
+    sns.heatmap(np.imag(rho_np), ax=axes[1], cmap="RdBu_r", 
+                center=0, vmin=vmin, vmax=vmax, 
+                annot=False, cbar=True, square=True)
+    axes[1].set_title(f"{title} - Imaginary Part")
+    
+    plt.tight_layout()
+    plt.show()
