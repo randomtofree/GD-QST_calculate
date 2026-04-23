@@ -93,15 +93,23 @@ def cost(rho1: jnp.ndarray,  lamb:float):
     return l2 + lamb*partial_transpose_b_penalty(rho)
 
 
-
 def gd_chol_bes_search(params: optax.Params, iterations: int,
-                       lr=2e-1, decay=0.01, lamb: float=0.01, 
+                       lr=2e-1, decay=0.01, 
+                       lamb: float=0.01, lamb_end: float=500, # 新增 lamb_end 保持兼容
                        tqdm_off=False, record_freq=100):
     """
     修改自 GD-QST，专用于搜索 Bound Entangled States (BES)。
-    采用 jax.lax.scan 与 chunking 机制重构，大幅减少 Python 调度开销。
+    采用 jax.lax.scan 与 chunking 机制重构，支持动态惩罚系数退火。
     输出接口与原版完全一致。
     """
+    # 【兼容性处理】：如果未提供 lamb_end，则退化为恒定 lamb
+    if lamb_end is None:
+        lamb_end = lamb
+    
+    # 预先生成整个迭代过程的 lambda 数组 (线性增长)
+    # 你也可以根据需要改成 jnp.logspace 实现指数增长
+    lamb_array = jnp.linspace(lamb, lamb_end, iterations)
+
     start_learning_rate = lr
     scheduler = optax.exponential_decay(
         init_value=start_learning_rate, 
@@ -122,10 +130,8 @@ def gd_chol_bes_search(params: optax.Params, iterations: int,
     
     opt_state = gradient_transform.init(params)
     
-    # 【优化 1】：将监控指标计算从核心更新循环中剥离
     @jax.jit
     def compute_metrics(current_params, current_lamb):
-        # 仅在需要记录时，才重构 rho 并计算耗时的 CCNR 和 PPT
         t_dag_t = jnp.matmul(jnp.conj(current_params.T), current_params)
         rho = t_dag_t / jnp.trace(t_dag_t)
         
@@ -134,58 +140,58 @@ def gd_chol_bes_search(params: optax.Params, iterations: int,
         ppt_val = partial_transpose_b_penalty(rho)
         return loss_val, ccnr_val, ppt_val
 
-    # 【优化 2】：lax.scan 的纯净单步更新函数（仅保留梯度和优化器状态计算）
-    def scan_step(state, step_idx):
+    # 【修改】：scan_step 现在的第二个输入变成了 current_lamb，而不是无用的 step_idx
+    def scan_step(state, current_lamb):
         current_params, current_opt_state = state
         
-        # 计算梯度
-        loss_val, grad_f = jax.value_and_grad(cost, argnums=0)(current_params, lamb)
+        # 将 current_lamb 动态传入代价函数
+        loss_val, grad_f = jax.value_and_grad(cost, argnums=0)(current_params, current_lamb)
         grads = jnp.conj(grad_f)
         
-        # 更新参数
         updates, new_opt_state = gradient_transform.update(grads, current_opt_state, current_params)
         new_params = optax.apply_updates(current_params, updates)
         
         return (new_params, new_opt_state), None
 
-    # 【优化 3】：利用 record_freq 作为 chunk_size
     chunk_size = record_freq
     num_chunks = iterations // chunk_size
     remainder = iterations % chunk_size
 
+    # 【修改】：scan_chunk 现在需要接收一段 lamb_chunk 数组作为遍历对象
     @jax.jit
-    def scan_chunk(current_state):
-        # 编译 chunk_size 次循环，完全在硬件底层运行
-        return jax.lax.scan(scan_step, current_state, jnp.arange(chunk_size))
+    def scan_chunk(current_state, lamb_chunk):
+        return jax.lax.scan(scan_step, current_state, lamb_chunk)
         
     @jax.jit
-    def scan_remainder(current_state):
-        # 处理不能被 chunk_size 整除的剩余迭代
-        return jax.lax.scan(scan_step, current_state, jnp.arange(remainder))
+    def scan_remainder(current_state, lamb_chunk):
+        return jax.lax.scan(scan_step, current_state, lamb_chunk)
 
     tot_time = 0
     current_state = (params, opt_state)
-    
-    # 进度条现在显示的是 Chunk 的进度，而不是单步的进度
     total_steps = num_chunks + (1 if remainder > 0 else 0)
-    pbar_GD = range(total_steps) if tqdm_off else tqdm(range(total_steps), desc="BES Search")
+    
+    # 【UI 优化】：使用 total=iterations 让进度条显示真实的总步数
+    pbar_GD = None if tqdm_off else tqdm(total=iterations, desc="BES Search")
 
-    for i in pbar_GD:
+    for i in range(total_steps):
         start = time.time()
         
-        # 1. 批量在底层执行参数更新
+        # 1. 切片获取当前 Chunk 对应的 lambda 数组
         if i < num_chunks:
-            current_state, _ = scan_chunk(current_state)
+            chunk_lambdas = lamb_array[i * chunk_size : (i + 1) * chunk_size]
+            current_state, _ = scan_chunk(current_state, chunk_lambdas)
+            steps_run = chunk_size
         else:
-            current_state, _ = scan_remainder(current_state)
+            chunk_lambdas = lamb_array[num_chunks * chunk_size : ]
+            current_state, _ = scan_remainder(current_state, chunk_lambdas)
+            steps_run = remainder
             
-        # 2. 提取当前 Chunk 结束后的最新参数
         current_params = current_state[0]
         
-        # 3. 计算本阶段的监控指标
-        loss_val, ccnr_val, ppt_val = compute_metrics(current_params, lamb)
+        # 取该 chunk 的最后一个 lambda 值来计算当前的监控指标
+        current_lamb_val = float(chunk_lambdas[-1])
+        loss_val, ccnr_val, ppt_val = compute_metrics(current_params, current_lamb_val)
         
-        # JAX 是异步的，调用 float() 会隐式触发 block_until_ready() 同步计算
         current_loss = float(loss_val)
         current_ccnr = float(ccnr_val)
         current_ppt = float(ppt_val)
@@ -193,16 +199,25 @@ def gd_chol_bes_search(params: optax.Params, iterations: int,
         end = time.time()
         tot_time += (end - start)
         
-        # 4. 记录数据（输出格式和频率与原版完全相同）
         loss1.append(current_loss)
         ccnr_track.append(current_ccnr)
         ppt_track.append(current_ppt)
         timel_GD.append(tot_time)
         
-        if not tqdm_off:
-            pbar_GD.set_description(f"Loss: {current_loss:.4f} | CCNR: {current_ccnr:.4f} | PPT: {current_ppt:.2e}")
+        # 2. 完美刷新进度条，避免刷屏
+        if pbar_GD is not None:
+            pbar_GD.update(steps_run)
+            pbar_GD.set_postfix({
+                "Loss": f"{current_loss:.4f}", 
+                "CCNR": f"{current_ccnr:.4f}", 
+                "PPT": f"{current_ppt:.2e}",
+                "Lamb": f"{current_lamb_val:.2f}" # 显示当前的 lambda 方便监控
+            })
 
-    # 最终结果重构，返回结构保持原样
+    if pbar_GD is not None:
+        pbar_GD.close()
+
+    # 最终结果重构
     final_params = current_state[0]
     params1 = jnp.matmul(jnp.conj(final_params.T), final_params) / jnp.trace(jnp.matmul(jnp.conj(final_params.T), final_params))
     
