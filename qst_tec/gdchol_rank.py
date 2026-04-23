@@ -88,14 +88,97 @@ def cost(rho1: jnp.ndarray,  lamb:float):
     # print(len(jnpexpect(Oper,rho1)))
     t_dag_t = jnp.conj(rho1.T) @ rho1
     rho = t_dag_t / jnp.trace(t_dag_t)
-    l2 = 3/(4*calculate_ccnr(rho)-1)
-    return l2 + lamb*partial_transpose_b_penalty(rho1)
+    l2 = -calculate_ccnr(rho)
+    return l2 + lamb*partial_transpose_b_penalty(rho)
 
 
+def gd_chol_bes_search(params: optax.Params, iterations: int,
+                       lr=2e-1, decay=0.01, lamb: float=0.01, 
+                       tqdm_off=False, record_freq=100):
+    """
+    修改自 GD-QST，专用于搜索 Bound Entangled States (BES)。
+    加入 record_freq 避免频繁的 GPU->CPU 数据传输。
+    """
+    start_learning_rate = lr
+    scheduler = optax.exponential_decay(
+        init_value=start_learning_rate, 
+        transition_steps=iterations,
+        decay_rate=decay)
+        
+    gradient_transform = optax.chain(
+        optax.clip_by_global_norm(1.0),  
+        optax.scale_by_adam(),           
+        optax.scale_by_schedule(scheduler), 
+        optax.scale(-1.0) 
+    )
+  
+    loss1 = []
+    ccnr_track = [] 
+    ppt_track = []   
+    timel_GD = []
+    
+    opt_state = gradient_transform.init(params)
+    
+    # 【加上 JIT 装饰器】
+    @jit
+    def step(params, opt_state, current_lamb):
+        # 1. 计算梯度与 loss
+        # 使用 value_and_grad 可以同时算出 loss 和 梯度，避免重复计算
+        loss_val, grad_f = jax.value_and_grad(cost, argnums=0)(params, current_lamb)
+        grads = jnp.conj(grad_f)
+    
+        # 2. 更新参数
+        updates, opt_state = gradient_transform.update(grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
 
+        # 3. 在 GPU 内部重构 rho 以计算监控指标
+        t_dag_t = jnp.matmul(jnp.conj(new_params.T), new_params)
+        rho = t_dag_t / jnp.trace(t_dag_t)
+    
+        # 4. 打包所有需要的指标
+        metrics = {
+            "loss": loss_val,
+            "ccnr": calculate_ccnr(rho),
+            "ppt_pen": partial_transpose_b_penalty(rho)
+        }
+    
+        return new_params, opt_state, metrics
+
+    tot_time = 0
+    pbar_GD = range(iterations) if tqdm_off else tqdm(range(iterations))
+
+    for i in pbar_GD:
+        start = time.time()
+        
+        # 【修正Bug】：正确接收 3 个返回值
+        params, opt_state, metrics = step(params, opt_state, lamb)
+        
+        end = time.time()
+        tot_time += (end - start)
+        
+        # 【性能优化】：仅在满足频率要求，或是最后一步时，才将数据拉回 CPU
+        if i % record_freq == 0 or i == iterations - 1:
+            # 这里的 float() 会触发 GPU 到 CPU 的同步
+            current_loss = float(metrics["loss"])
+            current_ccnr = float(metrics["ccnr"])
+            current_ppt = float(metrics["ppt_pen"])
+            
+            loss1.append(current_loss)
+            ccnr_track.append(current_ccnr)
+            ppt_track.append(current_ppt)
+            timel_GD.append(tot_time)
+            
+            if not tqdm_off:
+                pbar_GD.set_description(f"Loss: {current_loss:.4f} | CCNR: {current_ccnr:.4f} | PPT: {current_ppt:.2e}")
+
+    # 最终结果重构
+    params1 = jnp.matmul(jnp.conj(params.T), params) / jnp.trace(jnp.matmul(jnp.conj(params.T), params))
+    return params1, ccnr_track, ppt_track, timel_GD, loss1
+
+"""
 def gd_chol_rank(params: optax.Params, iterations: int,  batch_size: int,
             lr=2e-1, decay = 0.999, lamb:float =0.00001, batch=True, tqdm_off=False):
-  """
+
   Function to do the GD-Chol.
   Return:
     params1: The reconstructed density matrix
@@ -116,7 +199,7 @@ def gd_chol_rank(params: optax.Params, iterations: int,  batch_size: int,
     batch: True to have mini batches, False to take all the data
     tqdm_off: To show the iteration bar. True is to desactivate (for the cluster)
     
-  """
+ 
   start_learning_rate = lr
   # Exponential decay of the learning rate.
   scheduler = optax.exponential_decay(
@@ -186,3 +269,4 @@ def gd_chol_rank(params: optax.Params, iterations: int,  batch_size: int,
 
   params1 = jnp.matmul(jnp.conj(params.T),params)/jnp.trace(jnp.matmul(jnp.conj(params.T),params))
   return params1, fidelities_GD, timel_GD, loss1
+"""
