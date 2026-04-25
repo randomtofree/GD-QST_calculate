@@ -24,58 +24,86 @@ import time
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+# ==============================================================================
+# 自定义前向与反向传播 (用于绕过 JAX 默认 SVD 和 eigh 极其昂贵的 autodiff)
+# ==============================================================================
+
+# 1. CCNR 核范数的高效梯度
+@jax.custom_vjp
+def custom_nuclear_norm(M):
+    s = jnp.linalg.svd(M, compute_uv=False)
+    return jnp.sum(s)
+
+def nuclear_norm_fwd(M):
+    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    return jnp.sum(s), (U, Vh)
+
+def nuclear_norm_bwd(res, g):
+    U, Vh = res
+    # 返回解析梯度的复共轭以符合 JAX 底层约定
+    grad_M = g * (U @ Vh).conj()
+    return (grad_M,)
+
+custom_nuclear_norm.defvjp(nuclear_norm_fwd, nuclear_norm_bwd)
+
+
+# 2. PPT 惩罚的高效梯度
+@jax.custom_vjp
+def custom_ppt_penalty(rho_pt):
+    evals = jnp.linalg.eigvalsh(rho_pt)
+    return jnp.sum(jnp.minimum(0., evals)**2)
+
+def ppt_penalty_fwd(rho_pt):
+    evals, evecs = jnp.linalg.eigh(rho_pt)
+    penalty = jnp.sum(jnp.minimum(0., evals)**2)
+    return penalty, (evals, evecs)
+
+def ppt_penalty_bwd(res, g):
+    evals, evecs = res
+    grad_evals = jnp.where(evals < 0, 2.0 * evals, 0.0)
+    G = evecs @ jnp.diag(grad_evals) @ evecs.conj().T
+    # 返回解析梯度的复共轭
+    grad_matrix = g * G.conj()
+    return (grad_matrix,)
+
+custom_ppt_penalty.defvjp(ppt_penalty_fwd, ppt_penalty_bwd)
+
+@jit
+def calculate_ccnr(rho):
+    """计算密度矩阵 rho 的可计算交叉范数鲁棒性 (CCNR)"""
+    d = int(rho.shape[0] ** 0.5)
+    rho_tensor = rho.reshape((d, d, d, d))
+    # 重排张量
+    rho_R_tensor = jnp.transpose(rho_tensor, (0, 2, 1, 3))
+    rho_R = rho_R_tensor.reshape((d**2, d**2))
+    
+    # 【修改前】：
+    # return jnp.linalg.norm(rho_R, 'nuc')
+    
+    # 【修改后】：使用自定义 VJP
+    return custom_nuclear_norm(rho_R)
 
 
 @jit
-def calculate_ccnr(rho: jnp.ndarray):
-    """
-    计算双体系统密度矩阵的 CCNR (Realignment) 值
-    rho: shape (D, D) 的密度矩阵，其中 D = d_local**2
-    """
-    # 1. 自动获取维度
-    D = rho.shape[0]
-    # 使用 int() 确保 d 是静态整数，避免 JIT 报错
-    d = int(D**0.5) 
+def partial_transpose_b_penalty(rho):
+    """计算密度矩阵关于子系统 B 的部分转置 (PPT) 惩罚"""
+    d = int(rho.shape[0] ** 0.5)
+    rho_tensor = rho.reshape((d, d, d, d))
+    # 对子系统 B (后两个索引) 进行转置
+    # 【修复在此】：对子系统 B 进行转置，必须交换 row_B (轴 1) 和 col_B (轴 3)
+    rho_pt_tensor = jnp.transpose(rho_tensor, (0, 3, 2, 1))
     
-    # 2. Reshape 为 4 阶张量 (m, mu, n, nu)
-    tensor_rho = rho.reshape((d, d, d, d))
+    rho_pt = rho_pt_tensor.reshape((d**2, d**2))
     
-    # 3. Realignment 操作: (m, mu, n, nu) -> (m, n, mu, nu)
-    realigned_tensor = tensor_rho.transpose((0, 2, 1, 3))
+    # 确保 Hermitian 对称性以防浮点误差导致本征值计算报错
+    rho_pt = (rho_pt + rho_pt.conj().T) / 2.0
     
-    # 4. 压平回矩阵进行 SVD
-    realigned_matrix = realigned_tensor.reshape((D, D))
+    # 【修改前】：
+    # evals = jnp.linalg.eigvalsh(rho_pt)
+    # return jnp.sum(jnp.minimum(0., evals)**2)
     
-    # 5. 计算核范数 (Singular values 的和)
-    singular_values = jnp.linalg.svd(realigned_matrix, compute_uv=False)
-    
-    return jnp.sum(singular_values)
-
-
-@jit
-def partial_transpose_b_penalty(rho: jnp.ndarray):
-    """
-    对 d*d 系统的第二个子系统 (Bob) 进行偏转置并返回 NPT 惩罚值
-    """
-    # 1. 自动获取维度
-    D = rho.shape[0]
-    # 使用 int() 确保 d 是静态整数，避免 JIT 报错
-    d = int(D**0.5) 
-    
-    # 2. 重塑并偏转置
-    # (iA, iB, jA, jB) -> (iA, jB, jA, iB)
-    rho_pt = rho.reshape((d, d, d, d)).transpose((0, 3, 2, 1)).reshape((D, D))
-    
-    # 3. 计算特征值 (由于 rho 是 Hermite 的，PT 后依然是 Hermite 的)
-    # eigh 只计算特征值，[0] 拿到 evals
-    evals = jnp.linalg.eigh(rho_pt)[0]
-    
-    # 4. 惩罚逻辑
-    # 如果 evals >= 0 (PPT), 则返回 0
-    # 如果 evals < 0 (NPT), 则返回负值的平方和
-    # 建议加入一个极小的 epsilon 提高数值稳定性
-    neg_evals = jnp.maximum(0.0, -evals)
-    return jnp.sum(jnp.square(neg_evals))
+    # 【修改后】：使用自定义 VJP
+    return custom_ppt_penalty(rho_pt)
 
 
 @jit

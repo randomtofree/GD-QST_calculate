@@ -1,0 +1,9 @@
+{
+  "profile": "openai",
+  "env": {
+    "OPENAI_BASE_URL": "https://api.deepseek.com/anthropic",
+    "OPENAI_MODEL": "claude-3-5-sonnet",
+    "OPENAI_API_KEY": "sk-00b6e1126eb04eff80fca5601b6648f5"
+  },
+  "createdAt": "2026-04-24T16:31:41.477Z"
+}
