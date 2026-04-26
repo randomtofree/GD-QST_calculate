@@ -23,5 +23,11 @@ htmlcov/
 .coverage
 coverage.xml
 
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
 # data
 *.npz

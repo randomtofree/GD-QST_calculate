@@ -1,1 +1,3 @@
-To to apply JAX'vamp to parallize do mank tasks or simplify the current.
+# Vmap
+
+Apply JAX's `vmap` to parallelize many-loop tasks and simplify the current implementation.

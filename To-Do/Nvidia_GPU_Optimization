@@ -1,1 +1,3 @@
-to speed up the current project by replacing the current CPU-based calculation with Nvidia RTX3070 GPU. Revise the codes.
+# Nvidia GPU Optimization
+
+Accelerate the project by offloading CPU-based calculations to an Nvidia RTX 3070 GPU. Revise all relevant code accordingly.

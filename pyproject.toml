@@ -1,0 +1,65 @@
+# ============================================================
+# uv — fast Python package & project manager
+# ============================================================
+#
+# Quick start (once uv is installed):
+#
+#   1. Install uv (if not yet installed):
+#        curl -LsSf https://astral.sh/uv/install.sh | sh
+#
+#   2. Create a virtual environment with Python 3.10:
+#        uv venv --python 3.10
+#
+#   3. Activate it:
+#        source .venv/bin/activate   # macOS / Linux
+#
+#   4. Install all dependencies:
+#        uv sync
+#
+#   5. Run a script inside the environment:
+#        uv run python gan_bes_search.py
+#
+#   6. Add a new dependency later:
+#        uv add <package-name>
+#
+#   7. Update all packages:
+#        uv sync --upgrade
+#
+#   8. Generate a requirements.txt from this file:
+#        uv pip compile pyproject.toml -o requirements.txt
+#
+# Comparison with Conda for this project:
+#   - All dependencies are PyPI packages → no conda-forge needed
+#   - uv resolves ~10–100× faster than conda
+#   - Single pyproject.toml replaces environment.yml
+#   - Built-in venv management (no need for conda envs)
+# ============================================================
+
+[project]
+name = "SchmidtNumber"
+version = "0.1.0"
+description = "Quantum bound entangled state search with GAN + JAX"
+requires-python = ">=3.10,<3.11"
+
+dependencies = [
+    "cvxpy==1.5.3",
+    "ipywidgets",
+    "jax==0.4.23",
+    "jaxlib==0.4.23",
+    "jupyterlab",
+    "matplotlib==3.8.0",
+    "numpy",
+    "optax==0.1.8",
+    "platformdirs==4.1.0",
+    "qutip==5.0.0",
+    "qutip-qip==0.3.2",
+    "scipy==1.11.4",
+    "seaborn==0.13.2",
+    "tensorflow==2.15.0",
+    "tensorflow-addons==0.23.0",
+    "tqdm==4.66.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
