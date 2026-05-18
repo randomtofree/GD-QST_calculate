@@ -1,3 +1,0 @@
-# Vmap
-
-Apply JAX's `vmap` to parallelize many-loop tasks and simplify the current implementation.
