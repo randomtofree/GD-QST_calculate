@@ -7,11 +7,12 @@ import jax.numpy as jnp
 
 
 @jax.jit
-def build_separable_state(A, B):
+def build_separable_state(params_V):
     """
     基于 Carathéodory 思想的纯直积态凸组合。
     A, B 形状: (K, d)
     """
+    A, B = params_V
     def single_product_state(a, b):
         ab = jnp.kron(a, b) # 张量积
         return jnp.outer(ab, jnp.conj(ab)) # 构造密度矩阵
@@ -26,6 +27,32 @@ def distance_sq(rho1, rho2):
     return jnp.sum(jnp.abs(rho1 - rho2)**2)
 
 @jax.jit
+def ppt_value(rho_pt):
+    rho_pt_mat = partial_transpose(rho_pt)
+    evals = jnp.linalg.eigvalsh(rho_pt_mat)
+    return jnp.min(evals)
+
+@jax.custom_vjp
+def ppt_penalty(rho_pt):
+    evals = jnp.linalg.eigvalsh(rho_pt)
+    return jnp.sum(jnp.minimum(0., evals)**2)
+
+def ppt_penalty_fwd(rho_pt):
+    evals, evecs = jnp.linalg.eigh(rho_pt)
+    penalty = jnp.sum(jnp.minimum(0., evals)**2)
+    return penalty, (evals, evecs)
+
+def ppt_penalty_bwd(res, g):
+    evals, evecs = res
+    grad_evals = jnp.where(evals < 0, 2.0 * evals, 0.0)
+    G = evecs @ jnp.diag(grad_evals) @ evecs.conj().T
+    # Return the complex-conjugate of the analytic gradient
+    grad_matrix = g * G.conj()
+    return (grad_matrix,)
+
+ppt_penalty.defvjp(ppt_penalty_fwd, ppt_penalty_bwd)
+
+@jax.jit
 def partial_transpose(rho_estimated):
     d = int(rho_estimated.shape[0] ** 0.5)
     rho_tensor = rho_estimated.reshape((d, d, d, d))
@@ -33,6 +60,23 @@ def partial_transpose(rho_estimated):
     rho_pt = rho_pt_tensor.reshape((d**2, d**2))
     rho_pt = (rho_pt + rho_pt.conj().T) / 2.0
     return rho_pt
+
+@jax.custom_vjp
+def custom_nuclear_norm(M):
+    s = jnp.linalg.svd(M, compute_uv=False)
+    return jnp.sum(s)
+
+def nuclear_norm_fwd(M):
+    U, s, Vh = jnp.linalg.svd(M, full_matrices=False)
+    return jnp.sum(s), (U, Vh)
+
+def nuclear_norm_bwd(res, g):
+    U, Vh = res
+    # Return the complex-conjugate of the analytic gradient (JAX convention)
+    grad_M = g * (U @ Vh).conj()
+    return (grad_M,)
+
+custom_nuclear_norm.defvjp(nuclear_norm_fwd, nuclear_norm_bwd)
 
 def get_generalized_gell_mann(d):
     """
